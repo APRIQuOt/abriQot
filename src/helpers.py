@@ -3,11 +3,13 @@ import ast
 import copy
 import json
 import torch
+import pickle
 import numpy as np
 from enum import Enum
 import streamlit as st
 from typing import NamedTuple, get_type_hints, List, Dict, Union
 from src.tf_models.model_builder import *
+from src.my_types import Result, Ok, Err, SaveType
 
 class ModelType(Enum):
     RNN = 1
@@ -43,26 +45,7 @@ VMCConfigDescription = {
     "num_hidden_units": "Number of Hidden Units"
 }
 
-
-"""
-    PTF Optional arguments:
-    
-        L          (int)     -- The total number of atoms in your lattice.
-    
-        Nh         (int)     -- Transformer token size. Input patches are projected to match the token size.
-    
-        patch      (str)     -- Number of atoms input/predicted at once (patch size).
-                                The Input sequence will have an effective length of L/prod(patch).
-                                Example values: 2x2, 2x3, 2, 4
-            
-        dropout    (float)   -- The amount of dropout to use in the transformer layers.
-        
-        num_layers (int)     -- The number of transformer layers to use.
-        
-        nhead     (int)      -- The number of heads to use in Multi-headed Self-Attention. This should divide Nh.
-    
-        repeat_pre (bool)    -- Repeat the precondition (input) instead of projecting it out to match the token size.
-""" 
+ 
 class TransformerConfig(NamedTuple):
     L: int = 64
     # Nh: int = 128
@@ -81,26 +64,6 @@ TransformerConfigDescription = {
 }
 
 
-"""
-    LPTF Optional arguments:
-    
-        L          (int)     -- The total number of atoms in your lattice.
-    
-        Nh         (int)     -- Transformer token size. Input patches are projected to match the token size.
-                                Note: When using an RNN subsampler this Nh MUST match the rnn's Nh.
-    
-        patch      (int)     -- Number of atoms input/predicted at once (patch size).
-                                The Input sequence will have an effective length of L/patch.
-            
-        dropout    (float)   -- The amount of dropout to use in the transformer layers.
-        
-        num_layers (int)     -- The number of transformer layers to use.
-        
-        nhead     (int)     -- The number of heads to use in Multi-headed Self-Attention. This should divide Nh.
-        
-        subsampler (Sampler) -- The inner model to use for probability factorization. This is set implicitly
-                                by including --rnn or --ptf arguments. 
-"""
 class LargePatchedTransformerConfig(NamedTuple):
     L: int = 64
     Nh: int = 128
@@ -119,15 +82,6 @@ LargePatchedTransformerConfigDescription = {
 }
 
 
-"""
-The following parameters can be chosen for the Rydberg Hamiltonian:
-
-Lx                            			4
-Ly                            			4
-V                             			7.0
-Omega                         			1.0
-delta                         			1.0
-"""
 class RydbergConfig(NamedTuple):
     Lx: int = 4
     Ly: int = 4
@@ -143,18 +97,6 @@ RydbergConfigDescription = {
     "delta": "delta - The detuning"
 }
 
-"""
-        Q          (int)     -- Number of minibatches per batch.
-        K          (int)     -- size of each minibatch.
-        B          (int)     -- Total batch size (should be Q*K).
-        NLOOPS     (int)     -- Number of loops within the off_diag_labels function. Higher values save ram and
-                                generally makes the code run faster (up to 2x). Note, you can only set this
-                                as high as your effective sequence length. (Take L and divide by your patch size).
-        steps      (int)     -- Number of training steps.
-        lr         (float)   -- Learning rate.
-        seed       (int)     -- Random seed for the run.
-        sub_directory (str)  -- String to add to the end of the output directory (inside a subfolder). 
-"""
 class TrainConfig(NamedTuple):
     L: int = 64
     Q: int = 1
@@ -184,9 +126,6 @@ TrainConfigDescription = {
 # Create dictionary that maps the config to its description
 
 def get_widget(description, field_type, default_value, disabled=False):
-        # if isinstance(description, str) and description.split()[0] == "Patch":
-        #     pass
-        # else:
         if field_type == int:
             return st.number_input(description, min_value=0, value=default_value, step=1, disabled=disabled)
         elif field_type == float:
@@ -211,7 +150,6 @@ def get_widget_group(config: NamedTuple, desc_dict, exclude_list: List[str], sid
     if sidebar:
         for field_name, field_type in get_type_hints(config).items():
             default_value = field_defaults.get(field_name, None)
-            # description = field_name.replace("_", " ").title()
             description = desc_dict[field_name]
             
             widget_group[field_name] = get_sidebar_widget(description, field_type, default_value) if field_name not in exclude_list else get_sidebar_widget(description, field_type, default_value, True)
@@ -219,7 +157,6 @@ def get_widget_group(config: NamedTuple, desc_dict, exclude_list: List[str], sid
         for field_name, field_type in get_type_hints(config).items():
             if field_name != "patch":
                 default_value = field_defaults.get(field_name, None)
-                # description = field_name.replace("_", " ").title()
                 description = desc_dict[field_name]
                 
                 widget_group[field_name] = get_widget(description, field_type, default_value) if field_name not in exclude_list else get_widget(description, field_type, default_value, True)
@@ -266,13 +203,7 @@ def load_config(record_type: ModelType):
     #         return json.load(f)
         
 
-# Extract Command Line Arguments from PatchedTransformer/LargePatchedTransformer
 def extract_args(model_type: ModelType):
-    # Check if the model type is PatchedTransformer or LargePatchedTransformer
-    # Get configuration from the json file depending on the model type
-    # Check for overlapping keys in the configuration objects
-    # Break key values into a list of arguments/flags
-    # Return the list of arguments/flags
 
     # Step 1
     config = load_config(ModelType.Transformer)
@@ -412,22 +343,13 @@ def extract_loc_e(code: str) -> bool:
             # Check if the assigned variable is 'loc_e'
             if isinstance(node.targets[0], ast.Name) and node.targets[0].id == 'loc_e':
                 print([n for n in node.targets])
-                # print(node.value.left)
-                # Check if the value is a BinOp (binary operation) representing a sum
-                # if isinstance(node.value, ast.BinOp):
                 if isinstance(node.value, ast.Assign):
                     # Check if the left and right sides are also sums
                     terms = [node.value.left, node.value.right]
-                    # for l, term in enumerate(terms):
-                    #     print(l)
-                    #     print(term)
-                    #     print(isinstance(term, ast.BinOp))
-                    #     print(node.value.left.right.id)
 
                     if all(isinstance(term, ast.BinOp) for term in terms):
                         # Extract the actual variable names and check if they match
                         variables = [terms[0].left, terms[0].right, terms[1].right]
-                        # print(f"{variables=}")
                         variable_names = {var.id for var in variables if isinstance(var, ast.Name)}
                         expected_names = {'interaction_term', 'transverse_field', 'chemical_potential'}
                         if variable_names == expected_names:
@@ -469,3 +391,27 @@ def meets_cond(target_str: str):
         terms_target == targets_2_4_6
     
     return all_met
+
+
+# serialize to file
+def save_to_file(filename: str, obj: object, save_type: SaveType = SaveType.JSON) -> Result[str, str]:
+    if save_type.name == "PICKLE":
+        filename = f"{filename}.pkl"
+        try:
+            with open(filename, "wb") as f:
+                pickle.dump(obj, f)
+            return Ok("Object Successfully Saved")
+        except Exception as e:
+            return Err(f"Unsuccessful: {e}")
+        
+    elif save_type.name =="JSON":
+        filename = f"{filename}.json"
+        try:
+            with open(filename, "wb") as f:
+                json.dump(obj, f, indent=4)
+            return Ok("Object Successfully Saved")
+        except Exception as e:
+            return Err(f"Unsuccessful: {e}")
+        
+    else:
+        return Err("Unsupported format")
