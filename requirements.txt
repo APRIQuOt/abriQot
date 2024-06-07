@@ -1,6 +1,7 @@
 einops
 filelock
 flax
+ipywidgets
 jax
 jaxlib
 Jinja2
