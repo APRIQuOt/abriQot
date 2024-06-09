@@ -45,3 +45,11 @@ class Err(Result):
 class SaveType(enum.Enum):
     JSON = "json"
     PICKLE = "pkl"
+
+
+class InteractionType(enum.Enum):
+    NN = "nn"
+    NNN = "nnn"
+    ALL2ALL = "all2all"
+
+
